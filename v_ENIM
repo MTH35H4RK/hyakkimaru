@@ -1,0 +1,323 @@
+#include <QTRSensors.h>
+
+QTRSensors qtr;
+const uint8_t SensorCount = 6;
+
+uint16_t sensorValues[SensorCount];
+
+const int pwm[] = {6, 5};
+const int in1[] = {9, 4};
+const int in2[] = {10, 3};
+
+const int BASE_SPEED = 95;
+const int MAX_SPEED = 110;
+
+float Kp = 0.35;
+float Ki = 0.001;
+float Kd = 0.31;
+int lastError = 0;
+int integral = 0;
+
+uint16_t position;
+uint16_t position1;
+uint16_t position2;
+
+#define redLight 39
+#define yellowLight 41
+#define greenLight 43
+
+#define S0_PIN 18
+#define S1_PIN 17
+#define S2_PIN 15
+#define S3_PIN 14
+#define OUT_PIN 16
+
+unsigned long startMillis;  // some global variables available anywhere in the program
+unsigned long currentMillis;
+const unsigned long blueTimer = 3400;  // the value is a number of milliseconds
+const unsigned long redTimer = 11200;  // the value is a number of milliseconds
+const unsigned long greenTimer = 18500;  // the value is a number of milliseconds
+
+int looped = 0;
+int redDetected = 0, blueDetected = 0, greenDetected = 0, safeCheck = 0, colorTarget = 0, colorDetected = 0;
+int retryCount = 0;
+const int maxRetries = 1;  // maximum number of retries for color detection
+
+void setMotors(int speedA, int speedB) {
+  if (speedA < 5 && speedA >= 0) {
+    digitalWrite(in2[0], HIGH);
+    digitalWrite(in1[0], HIGH);
+    analogWrite(pwm[0], 0);
+  }
+  if (speedB < 5 && speedB >= 0) {
+    digitalWrite(in2[1], HIGH);
+    digitalWrite(in1[1], HIGH);
+    analogWrite(pwm[1], 0);
+  }
+  if (speedA < 0) {
+    digitalWrite(in2[0], HIGH);
+    digitalWrite(in1[0], LOW);
+    analogWrite(pwm[0], -speedA);
+  } else {
+    digitalWrite(in2[0], LOW);
+    digitalWrite(in1[0], HIGH);
+    analogWrite(pwm[0], speedA);
+  }
+
+  if (speedB < 0) {
+    digitalWrite(in2[1], HIGH);
+    digitalWrite(in1[1], LOW);
+    analogWrite(pwm[1], -speedB);
+  } else {
+    digitalWrite(in2[1], LOW);
+    digitalWrite(in1[1], HIGH);
+    analogWrite(pwm[1], speedB);
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(in2[1], OUTPUT);
+  pinMode(in1[1], OUTPUT);
+  pinMode(in2[0], OUTPUT);
+  pinMode(in1[0], OUTPUT);
+  pinMode(pwm[0], OUTPUT);
+  pinMode(pwm[1], OUTPUT);
+
+  qtr.setTypeRC();
+
+  qtr.setSensorPins((const uint8_t[]) {
+    A10, A11, A12, A13, A14, A15
+  }, SensorCount);
+
+  Serial.println("Start");
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  pinMode(redLight, OUTPUT);
+  pinMode(yellowLight, OUTPUT);
+  pinMode(greenLight, OUTPUT);
+
+  pinMode(S0_PIN, OUTPUT);
+  pinMode(S1_PIN, OUTPUT);
+  pinMode(S2_PIN, OUTPUT);
+  pinMode(S3_PIN, OUTPUT);
+  pinMode(OUT_PIN, INPUT);
+
+  digitalWrite(S0_PIN, HIGH);
+  digitalWrite(S1_PIN, LOW);
+
+  startMillis = millis();
+}
+
+void Npid() {
+  qtr.read(sensorValues);
+
+  if (sensorValues[0] > 1500) {
+    position = -500;
+    for (int i = 0; i < 100; i++) {
+      setMotors(0, 80);
+      delay(2);
+    }
+  } else if (sensorValues[1] > 1500) {
+    position = 500;
+  } else if (sensorValues[2] > 1500) {
+    position = 2350;
+  } else if (sensorValues[3] > 1500) {
+    position = 2650;
+  } else if (sensorValues[4] > 1500) {
+    position = 4000;
+  } else if (sensorValues[5] > 1500) {
+    position = 5000;
+
+  }
+
+  int error = position - 2500;
+  integral += error;
+  integral = constrain(integral, -10000, 10000);
+
+  int derivative = error - lastError;
+
+  int speedDifference = Kp * error + Ki * integral + Kd * derivative;
+
+  int speedA = BASE_SPEED + speedDifference;  // Right
+  int speedB = BASE_SPEED - speedDifference;  // Left
+
+  speedA = constrain(speedA, -80, MAX_SPEED);
+  speedB = constrain(speedB, -80, MAX_SPEED);
+
+  setMotors(speedA, speedB);
+
+  lastError = error;
+}
+
+int readFrequency() {
+  return pulseIn(OUT_PIN, LOW);
+}
+
+void colorDetect() {
+  static int redCount = 0;
+  static int greenCount = 0;
+  static int blueCount = 0;
+  static int whiteCount = 0;
+  const int thresholdCount = 100;
+
+  int redFrequency, greenFrequency, blueFrequency;
+  int whiteThreshold = 50; // Adjust this threshold based on your specific setup
+
+  digitalWrite(S2_PIN, LOW);
+  digitalWrite(S3_PIN, LOW);
+  redFrequency = readFrequency();
+
+  digitalWrite(S2_PIN, HIGH);
+  digitalWrite(S3_PIN, HIGH);
+  greenFrequency = readFrequency();
+
+  digitalWrite(S2_PIN, LOW);
+  digitalWrite(S3_PIN, HIGH);
+  blueFrequency = readFrequency();
+
+  if (redFrequency < whiteThreshold && greenFrequency < whiteThreshold && blueFrequency < whiteThreshold) {
+    whiteCount++;
+    redCount = 0;
+    greenCount = 0;
+    blueCount = 0;
+  } else if (redFrequency < greenFrequency && redFrequency < blueFrequency) {
+    redCount++;
+    greenCount = 0;
+    blueCount = 0;
+    whiteCount = 0;
+  } else if (greenFrequency < redFrequency && greenFrequency < blueFrequency) {
+    greenCount++;
+    redCount = 0;
+    blueCount = 0;
+    whiteCount = 0;
+  } else if (blueFrequency < redFrequency && blueFrequency < greenFrequency) {
+    blueCount++;
+    redCount = 0;
+    greenCount = 0;
+    whiteCount = 0;
+  } else {
+    redCount = 0;
+    greenCount = 0;
+    blueCount = 0;
+    whiteCount = 0;
+  }
+
+  if (redCount >= thresholdCount) {
+    Serial.println("Red detected");
+    redCount = 0;
+    colorDetected = 3;
+  } else if (greenCount >= thresholdCount) {
+    Serial.println("Green detected");
+    greenCount = 0;
+    colorDetected = 4;
+  } else if (blueCount >= thresholdCount) {
+    Serial.println("Blue detected");
+    blueCount = 0;
+    colorDetected = 2;
+  } else if (whiteCount >= thresholdCount) {
+    Serial.println("White detected");
+    whiteCount = 0;
+    colorDetected = 1;
+  }
+}
+
+void resetDetection() {
+  safeCheck = 0;
+  retryCount = 0;
+}
+
+void things() {
+
+}
+
+void loop() {
+  currentMillis = millis();  // get the current "time" (actually the number of milliseconds since the program started)
+  Npid();
+  if ((currentMillis - startMillis) >= (blueTimer - 1000)) {
+    if (blueDetected == 0 && safeCheck == 0)  // test whether the period has elapsed // 2 - blue && 3 - red && 4 - green
+    {
+      Serial.println("Start detecting blue!");
+      safeCheck = 1;
+      colorTarget = 2;
+    }
+  }
+  if ((currentMillis - startMillis) >= (redTimer - 1000)) {
+    if (redDetected == 0 && safeCheck == 0)  // test whether the period has elapsed // 2 - blue && 3 - red && 4 - green
+    {
+      Serial.println("Start detecting red!");
+      safeCheck = 1;
+      colorTarget = 3;
+    }
+  }
+  if ((currentMillis - startMillis) >= (greenTimer - 1000)) {
+    if (greenDetected == 0 && safeCheck == 0)  // test whether the period has elapsed // 2 - blue && 3 - red && 4 - green
+    {
+      Serial.println("Start detecting green!");
+      safeCheck = 1;
+      colorTarget = 4;
+    }
+  }
+  if (safeCheck == 1) {
+    if (safeCheck == 1 && colorTarget == 2 && (currentMillis - startMillis) < (blueTimer + 1000) && blueDetected == 0) {
+      colorDetect();
+      if (colorDetected == 2) {
+        digitalWrite(yellowLight, HIGH);
+        blueDetected = 1;
+        resetDetection();
+        Serial.println("Blue detected! via colorpad");
+      }
+    } else if (safeCheck == 1 && colorTarget == 2 && (currentMillis - startMillis) >= (blueTimer + 1000) && blueDetected == 0) {
+      retryCount++;
+      if (retryCount < maxRetries) {
+        Serial.println("Retrying detection for blue...");
+        startMillis = millis();
+      } else {
+        digitalWrite(yellowLight, HIGH);
+        blueDetected = 1;
+        resetDetection();
+        Serial.println("Timeover, Detection Failed!, switching the blue light");
+      }
+    } else if (safeCheck == 1 && colorTarget == 3 && (currentMillis - startMillis) < (redTimer + 1000) && redDetected == 0) {
+      colorDetect();
+      if (colorDetected == 3) {
+        digitalWrite(redLight, HIGH);
+        redDetected = 1;
+        resetDetection();
+        Serial.println("Red detected! via colorpad");
+      }
+    } else if (safeCheck == 1 && colorTarget == 3 && (currentMillis - startMillis) >= (redTimer + 1000) && redDetected == 0) {
+      retryCount++;
+      if (retryCount < maxRetries) {
+        Serial.println("Retrying detection for red...");
+        startMillis = millis();
+      } else {
+        digitalWrite(redLight, HIGH);
+        redDetected = 1;
+        resetDetection();
+        Serial.println("Timeover, Detection Failed!, switching the red light");
+      }
+    } else if (safeCheck == 1 && colorTarget == 4 && (currentMillis - startMillis) < (greenTimer + 1000) && greenDetected == 0) {
+      colorDetect();
+      if (colorDetected == 4) {
+        digitalWrite(greenLight, HIGH);
+        greenDetected = 1;
+        resetDetection();
+        Serial.println("Green detected! via colorpad");
+      }
+    } else if (safeCheck == 1 && colorTarget == 4 && (currentMillis - startMillis) >= (greenTimer + 1000) && greenDetected == 0) {
+      retryCount++;
+      if (retryCount < maxRetries) {
+        Serial.println("Retrying detection for green...");
+        startMillis = millis();
+      } else {
+        digitalWrite(greenLight, HIGH);
+        greenDetected = 1;
+        resetDetection();
+        Serial.println("Timeover, Detection Failed!, switching the green light");
+      }
+    }
+  }
+}
